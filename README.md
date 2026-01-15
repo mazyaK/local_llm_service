@@ -1,6 +1,7 @@
 ## Qwen3-8B + vLLM (A5000 24GB) + OpenAI-compatible REST API (Docker)
 
 Развёртывание модели **`Qwen/Qwen3-8B`** на **NVIDIA A5000 24GB** с инференсом через **vLLM** и OpenAI-совместимыми эндпоинтами:
+
 - **`/v1/chat/completions`** (включая **streaming** SSE)
 - **`/v1/models`**
 - **`/health`**
@@ -27,7 +28,7 @@
 Проверка, что Docker видит GPU:
 
 ```bash
-docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu24.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.6.1-base-ubuntu24.04 nvidia-smi
 ```
 
 ---
@@ -43,6 +44,7 @@ cp env.example .env
 ```
 
 Поля:
+
 - **`HF_TOKEN`**: токен Hugging Face (нужен для gated/private моделей)
 - **`MODEL_NAME`**: `Qwen/Qwen3-8B` или локальный путь `/data/models/...`
 - **`DTYPE=bfloat16`**, **`GPU_MEMORY_UTILIZATION=0.85`**, **`MAX_MODEL_LEN=8192`**, **`TENSOR_PARALLEL_SIZE=1`**
@@ -59,6 +61,7 @@ HF_TOKEN=... ./download_model.sh Qwen/Qwen3-8B
 ```
 
 После скачивания можно переключиться на локальный путь:
+
 - **`MODEL_NAME=/data/models/Qwen__Qwen3-8B`** (имя папки формируется из model id)
 
 ---
@@ -140,6 +143,7 @@ docker compose --profile api up -d --build
 ```
 
 Если в `.env` задан `API_KEY`, то прокси будет требовать:
+
 - `Authorization: Bearer <API_KEY>`
 
 ---
@@ -147,12 +151,14 @@ docker compose --profile api up -d --build
 ## Оптимизация под A5000 (24GB)
 
 В `docker-compose.yml` уже выставлено:
+
 - **`--dtype bfloat16`**: тип для уменьшения VRAM (обычно подходит для Ampere/A5000)
 - **`--gpu-memory-utilization 0.85`**: оставляет запас под KV cache / пики
 - **`--max-model-len 8192`**: разумный потолок контекста под 24GB
 - **`--tensor-parallel-size 1`**: одна GPU
 
 Если получите OOM:
+
 - снизьте `GPU_MEMORY_UTILIZATION` до `0.80`
 - снизьте `MAX_MODEL_LEN` до `6144` или `4096`
 
@@ -161,14 +167,14 @@ docker compose --profile api up -d --build
 ## Troubleshooting
 
 - **Container не видит GPU**:
+
   - проверьте `nvidia-smi` на хосте
   - проверьте `docker run --rm --gpus all ... nvidia-smi`
   - убедитесь, что установлен NVIDIA Container Toolkit и Docker перезапущен
-
 - **Слишком долго стартует на первом запуске**:
+
   - это нормально, идёт скачивание модели/кэша
   - используйте `download_model.sh` заранее
-
 - **Ошибки trust_remote_code**:
-  - в compose уже включено `--trust-remote-code`
 
+  - в compose уже включено `--trust-remote-code`
