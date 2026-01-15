@@ -1,8 +1,8 @@
-## Qwen3-8B + vLLM (A5000 24GB) + OpenAI-compatible REST API (Docker)
+## Локальная LLM + vLLM (A5000 24GB) + OpenAI-совместимый REST API (Docker)
 
-Развёртывание модели **`Qwen/Qwen3-8B`** на **NVIDIA A5000 24GB** с инференсом через **vLLM** и OpenAI-совместимыми эндпоинтами:
+Развёртывание **любой LLM** (из Hugging Face или локальной папки) на **NVIDIA A5000 24GB** с инференсом через **vLLM** и эндпоинтами в формате **OpenAI API**:
 
-- **`/v1/chat/completions`** (включая **streaming** SSE)
+- **`/v1/chat/completions`** (включая потоковую выдачу (**SSE**))
 - **`/v1/models`**
 - **`/health`**
 
@@ -46,7 +46,8 @@ cp env.example .env
 Поля:
 
 - **`HF_TOKEN`**: токен Hugging Face (нужен для gated/private моделей)
-- **`MODEL_NAME`**: `Qwen/Qwen3-8B` или локальный путь `/data/models/...`
+- **`MODEL_NAME`**: Hugging Face repo id (например, `org/model-name`) или локальный путь `/data/models/...`
+- **`SERVED_MODEL_NAME`**: любой удобный id (то, что будет в `/v1/models` и что вы указываете как `"model": "..."` в запросах)
 - **`DTYPE=bfloat16`**, **`GPU_MEMORY_UTILIZATION=0.85`**, **`MAX_MODEL_LEN=8192`**, **`TENSOR_PARALLEL_SIZE=1`**
 
 ---
@@ -57,12 +58,12 @@ cp env.example .env
 
 ```bash
 chmod +x download_model.sh
-HF_TOKEN=... ./download_model.sh Qwen/Qwen3-8B
+HF_TOKEN=... ./download_model.sh org/model-name
 ```
 
 После скачивания можно переключиться на локальный путь:
 
-- **`MODEL_NAME=/data/models/Qwen__Qwen3-8B`** (имя папки формируется из model id)
+- **`MODEL_NAME=/data/models/<ИМЯ_ПАПКИ_ИЗ_СКРИПТА>`** (скрипт сам подскажет итоговый путь)
 
 ---
 
@@ -88,7 +89,7 @@ nvidia-smi
 
 ## 5) Проверка API
 
-### cURL (non-stream)
+### cURL (без потока)
 
 ```bash
 curl -s http://localhost:8000/v1/models | jq
@@ -98,20 +99,20 @@ curl -s http://localhost:8000/v1/models | jq
 curl -s http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"qwen3-8b",
+    "model":"local-model",
     "messages":[{"role":"user","content":"Привет! Коротко объясни, что такое vLLM."}],
     "max_tokens":128,
     "temperature":0.2
   }' | jq
 ```
 
-### cURL (streaming SSE)
+### cURL (потоковая выдача SSE)
 
 ```bash
 curl -N http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"qwen3-8b",
+    "model":"local-model",
     "messages":[{"role":"user","content":"Напиши 3 пункта, почему streaming полезен."}],
     "max_tokens":128,
     "temperature":0.2,
@@ -119,7 +120,7 @@ curl -N http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-### Python test
+### Тест на Python
 
 ```bash
 python3 -m pip install -r requirements.txt
@@ -164,7 +165,7 @@ docker compose --profile api up -d --build
 
 ---
 
-## Troubleshooting
+## Устранение неполадок
 
 - **Container не видит GPU**:
 

@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_ID="${1:-Qwen/Qwen3-8B}"
+MODEL_ID="${1:-${MODEL_ID:-}}"
+if [[ -z "${MODEL_ID}" ]]; then
+  echo "Ошибка: не указан идентификатор модели."
+  echo "Использование:"
+  echo "  HF_TOKEN=... ./download_model.sh <HF_REPO_ID>"
+  echo "Пример:"
+  echo "  HF_TOKEN=... ./download_model.sh org/model-name"
+  echo
+  echo "Либо задайте переменную окружения MODEL_ID:"
+  echo "  export MODEL_ID=org/model-name"
+  exit 2
+fi
 SAFE_DIR_NAME="$(echo "${MODEL_ID}" | tr '/:' '__')"
 
 mkdir -p "./data/models/${SAFE_DIR_NAME}"

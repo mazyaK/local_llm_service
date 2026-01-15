@@ -19,35 +19,45 @@ def sse_stream(resp: requests.Response):
 
 def main() -> int:
     base_url = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
-    model = os.getenv("MODEL", "qwen3-8b")
+    model = os.getenv("MODEL", "").strip()
     api_key = os.getenv("API_KEY", "").strip()
 
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    print(f"Base URL: {base_url}")
+    print(f"Базовый URL: {base_url}")
 
-    # Health
+    # Проверка /health (если доступно)
     try:
         r = requests.get(f"{base_url}/health", timeout=5)
         print("GET /health:", r.status_code, r.text[:200])
     except Exception as e:
-        print("GET /health failed:", e)
+        print("GET /health не удалось:", e)
 
-    # Models
+    # Список моделей (нужен, чтобы автоматически выбрать model id)
     r = requests.get(f"{base_url}/v1/models", headers=headers, timeout=30)
     print("GET /v1/models:", r.status_code)
     if r.status_code != 200:
         print(r.text)
         return 1
+    if not model:
+        try:
+            data = r.json().get("data", [])
+            model = data[0]["id"] if data else ""
+        except Exception:
+            model = ""
+    if not model:
+        print("Не удалось определить model id автоматически. Укажите переменную окружения MODEL.")
+        return 1
+    print(f"Используем модель: {model}")
 
-    # Non-streaming chat
+    # Чат без потоковой выдачи
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Say 'ping' and then explain in 1 sentence what you are."},
+            {"role": "system", "content": "Ты полезный ассистент."},
+            {"role": "user", "content": "Скажи «пинг» и затем одним предложением объясни, кто ты."},
         ],
         "temperature": 0.2,
         "max_tokens": 128,
@@ -56,15 +66,15 @@ def main() -> int:
     t0 = time.time()
     r = requests.post(f"{base_url}/v1/chat/completions", headers=headers, data=json.dumps(payload), timeout=300)
     dt = time.time() - t0
-    print("POST /v1/chat/completions (non-stream):", r.status_code, f"{dt:.2f}s")
+    print("POST /v1/chat/completions (без потока):", r.status_code, f"{dt:.2f}s")
     if r.status_code != 200:
         print(r.text)
         return 1
-    print("Assistant:", r.json()["choices"][0]["message"]["content"])
+    print("Ответ:", r.json()["choices"][0]["message"]["content"])
 
-    # Streaming chat
+    # Чат с потоковой выдачей (SSE)
     payload["stream"] = True
-    print("\nStreaming response:")
+    print("\nПотоковый ответ:")
     with requests.post(
         f"{base_url}/v1/chat/completions",
         headers=headers,
@@ -72,7 +82,7 @@ def main() -> int:
         stream=True,
         timeout=300,
     ) as r:
-        print("POST /v1/chat/completions (stream):", r.status_code)
+        print("POST /v1/chat/completions (поток):", r.status_code)
         if r.status_code != 200:
             print(r.text)
             return 1
@@ -84,9 +94,9 @@ def main() -> int:
                     sys.stdout.write(delta)
                     sys.stdout.flush()
             except Exception:
-                # Sometimes you may see keep-alives or partial lines; ignore
+                # Иногда встречаются keep-alive/частичные строки — игнорируем
                 pass
-    print("\n\nDone.")
+    print("\n\nГотово.")
     return 0
 
 

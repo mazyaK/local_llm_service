@@ -5,7 +5,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-app = FastAPI(title="Qwen3 vLLM Proxy", version="1.0.0")
+app = FastAPI(title="vLLM Proxy", version="1.0.0")
 
 
 def _get_vllm_base_url() -> str:
