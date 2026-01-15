@@ -15,10 +15,16 @@ docker run --rm \
   -v "$(pwd)/data:/data" \
   python:3.11-slim \
   bash -c "
-    pip install --no-cache-dir 'huggingface-hub[cli]>=0.20.0' || exit 1
-    huggingface-cli download '${MODEL_ID}' \
-      --local-dir '/data/models/${SAFE_DIR_NAME}' \
-      --local-dir-use-symlinks False
+    pip install --no-cache-dir 'huggingface-hub>=0.20.0' || exit 1
+    python -c \"
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id='${MODEL_ID}',
+    local_dir='/data/models/${SAFE_DIR_NAME}',
+    local_dir_use_symlinks=False,
+    token='${HF_TOKEN:-}'
+)
+\"
   "
 
 echo
