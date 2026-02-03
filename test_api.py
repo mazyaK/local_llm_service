@@ -1,3 +1,18 @@
+#!/usr/bin/env python3
+"""
+Тестовый скрипт для проверки LLM API.
+Работает с любым backend'ом (vLLM, Ollama, llama.cpp).
+
+Использование:
+    python test_api.py
+
+Переменные окружения:
+    BASE_URL      - URL API (по умолчанию определяется по LLM_BACKEND)
+    LLM_BACKEND   - backend (vllm, ollama, llamacpp) — влияет на BASE_URL
+    MODEL         - имя модели (если не задано — определяется автоматически)
+    API_KEY       - API ключ (опционально)
+"""
+
 import json
 import os
 import sys
@@ -6,7 +21,26 @@ import time
 import requests
 
 
+# URL по умолчанию для каждого backend'а
+DEFAULT_URLS = {
+    "vllm": "http://localhost:8000",
+    "ollama": "http://localhost:8000",  # Порт проброшен в compose: 8000:11434
+    "llamacpp": "http://localhost:8000",  # Порт проброшен в compose: 8000:8080
+}
+
+
+def get_base_url() -> str:
+    """Определяет BASE_URL по переменным окружения."""
+    explicit = os.getenv("BASE_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+
+    backend = os.getenv("LLM_BACKEND", "vllm").lower().strip()
+    return DEFAULT_URLS.get(backend, DEFAULT_URLS["vllm"])
+
+
 def sse_stream(resp: requests.Response):
+    """Генератор для парсинга SSE-потока."""
     for line in resp.iter_lines(decode_unicode=True):
         if not line:
             continue
@@ -18,88 +52,164 @@ def sse_stream(resp: requests.Response):
 
 
 def main() -> int:
-    base_url = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
+    base_url = get_base_url()
     model = os.getenv("MODEL", "").strip()
     api_key = os.getenv("API_KEY", "").strip()
+    backend = os.getenv("LLM_BACKEND", "vllm").lower().strip()
 
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    print("=" * 50)
+    print(f"Backend:     {backend}")
     print(f"Базовый URL: {base_url}")
+    print("=" * 50)
 
-    # Проверка /health (если доступно)
+    # =========================================================================
+    # Проверка /health
+    # =========================================================================
+    print("\n[1] Проверка /health")
     try:
         r = requests.get(f"{base_url}/health", timeout=5)
-        print("GET /health:", r.status_code, r.text[:200])
+        print(f"    GET /health: {r.status_code}")
+        if r.status_code == 200:
+            print(f"    Ответ: {r.text[:200]}")
+    except requests.exceptions.ConnectionError:
+        print("    /health недоступен (это нормально для некоторых backend'ов)")
     except Exception as e:
-        print("GET /health не удалось:", e)
+        print(f"    Ошибка: {e}")
 
-    # Список моделей (нужен, чтобы автоматически выбрать model id)
-    r = requests.get(f"{base_url}/v1/models", headers=headers, timeout=30)
-    print("GET /v1/models:", r.status_code)
-    if r.status_code != 200:
-        print(r.text)
-        return 1
-    if not model:
-        try:
-            data = r.json().get("data", [])
-            model = data[0]["id"] if data else ""
-        except Exception:
-            model = ""
-    if not model:
-        print("Не удалось определить model id автоматически. Укажите переменную окружения MODEL.")
-        return 1
-    print(f"Используем модель: {model}")
+    # =========================================================================
+    # Список моделей
+    # =========================================================================
+    print("\n[2] Получение списка моделей")
+    try:
+        r = requests.get(f"{base_url}/v1/models", headers=headers, timeout=30)
+        print(f"    GET /v1/models: {r.status_code}")
 
-    # Чат без потоковой выдачи
+        if r.status_code != 200:
+            print(f"    Ошибка: {r.text}")
+            return 1
+
+        models_data = r.json()
+        available_models = models_data.get("data", [])
+
+        if available_models:
+            print(f"    Доступные модели: {[m.get('id', m) for m in available_models]}")
+
+            # Автоопределение модели
+            if not model:
+                model = available_models[0].get("id", "")
+                print(f"    Автовыбор модели: {model}")
+        else:
+            print("    Моделей не найдено в ответе")
+
+    except Exception as e:
+        print(f"    Ошибка при получении моделей: {e}")
+        return 1
+
+    if not model:
+        print("\n    Не удалось определить модель. Укажите переменную MODEL.")
+        return 1
+
+    # =========================================================================
+    # Chat completions (без потока)
+    # =========================================================================
+    print(f"\n[3] Chat completions (без потока), модель: {model}")
+
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "Ты полезный ассистент."},
-            {"role": "user", "content": "Скажи «пинг» и затем одним предложением объясни, кто ты."},
+            {"role": "system", "content": "Ты полезный ассистент. Отвечай кратко."},
+            {"role": "user", "content": "Скажи «пинг» и кратко объясни, кто ты."},
         ],
         "temperature": 0.2,
         "max_tokens": 128,
         "stream": False,
     }
-    t0 = time.time()
-    r = requests.post(f"{base_url}/v1/chat/completions", headers=headers, data=json.dumps(payload), timeout=300)
-    dt = time.time() - t0
-    print("POST /v1/chat/completions (без потока):", r.status_code, f"{dt:.2f}s")
-    if r.status_code != 200:
-        print(r.text)
-        return 1
-    print("Ответ:", r.json()["choices"][0]["message"]["content"])
 
-    # Чат с потоковой выдачей (SSE)
-    payload["stream"] = True
-    print("\nПотоковый ответ:")
-    with requests.post(
-        f"{base_url}/v1/chat/completions",
-        headers=headers,
-        data=json.dumps(payload),
-        stream=True,
-        timeout=300,
-    ) as r:
-        print("POST /v1/chat/completions (поток):", r.status_code)
+    try:
+        t0 = time.time()
+        r = requests.post(
+            f"{base_url}/v1/chat/completions",
+            headers=headers,
+            data=json.dumps(payload),
+            timeout=300,
+        )
+        dt = time.time() - t0
+
+        print(f"    POST /v1/chat/completions: {r.status_code} ({dt:.2f}s)")
+
         if r.status_code != 200:
-            print(r.text)
+            print(f"    Ошибка: {r.text}")
             return 1
-        for data in sse_stream(r):
-            try:
-                obj = json.loads(data)
-                delta = obj["choices"][0].get("delta", {}).get("content", "")
-                if delta:
-                    sys.stdout.write(delta)
-                    sys.stdout.flush()
-            except Exception:
-                # Иногда встречаются keep-alive/частичные строки — игнорируем
-                pass
-    print("\n\nГотово.")
+
+        response_data = r.json()
+        content = response_data["choices"][0]["message"]["content"]
+        print(f"    Ответ: {content}")
+
+        # Статистика использования (если есть)
+        usage = response_data.get("usage", {})
+        if usage:
+            print(f"    Токены: prompt={usage.get('prompt_tokens', '?')}, "
+                  f"completion={usage.get('completion_tokens', '?')}, "
+                  f"total={usage.get('total_tokens', '?')}")
+
+    except Exception as e:
+        print(f"    Ошибка: {e}")
+        return 1
+
+    # =========================================================================
+    # Chat completions (с потоком SSE)
+    # =========================================================================
+    print(f"\n[4] Chat completions (поток SSE), модель: {model}")
+
+    payload["stream"] = True
+    payload["messages"][1]["content"] = "Напиши 3 коротких пункта о себе."
+
+    try:
+        print("    Потоковый ответ: ", end="", flush=True)
+
+        with requests.post(
+            f"{base_url}/v1/chat/completions",
+            headers=headers,
+            data=json.dumps(payload),
+            stream=True,
+            timeout=300,
+        ) as r:
+            if r.status_code != 200:
+                print(f"\n    Ошибка: {r.status_code} {r.text}")
+                return 1
+
+            collected = []
+            for data in sse_stream(r):
+                try:
+                    obj = json.loads(data)
+                    delta = obj["choices"][0].get("delta", {}).get("content", "")
+                    if delta:
+                        sys.stdout.write(delta)
+                        sys.stdout.flush()
+                        collected.append(delta)
+                except json.JSONDecodeError:
+                    # Иногда приходят неполные JSON — игнорируем
+                    pass
+
+        print()  # Новая строка после потока
+
+    except Exception as e:
+        print(f"\n    Ошибка: {e}")
+        return 1
+
+    # =========================================================================
+    # Итог
+    # =========================================================================
+    print("\n" + "=" * 50)
+    print("Все проверки пройдены успешно!")
+    print("=" * 50)
+
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -1,181 +1,299 @@
-## Локальная LLM + vLLM (A5000 24GB) + OpenAI-совместимый REST API (Docker)
+# Локальный LLM-сервис с переключаемым backend'ом
 
-Развёртывание **любой LLM** (из Hugging Face или локальной папки) на **NVIDIA A5000 24GB** с инференсом через **vLLM** и эндпоинтами в формате **OpenAI API**:
+Развёртывание LLM на GPU с **переключением между тремя backend'ами**:
+- **vLLM** — высокая производительность, оптимизации под GPU
+- **Ollama** — простота использования, встроенный менеджер моделей
+- **llama.cpp** — максимальная гибкость, GGUF-квантизации
 
-- **`/v1/chat/completions`** (включая потоковую выдачу (**SSE**))
-- **`/v1/models`**
-- **`/health`**
-
-По умолчанию используется официальный образ **`vllm/vllm-openai:latest`** (он уже поднимает FastAPI-сервер). В репозитории также есть **опциональный** FastAPI-прокси (профиль `api`) для API key / кастомных проверок здоровья / логирования.
+Все backend'ы предоставляют **OpenAI-совместимый API**:
+- `POST /v1/chat/completions` (с поддержкой streaming SSE)
+- `GET /v1/models`
+- `GET /health`
 
 ---
 
 ## Требования
 
-- Ubuntu 24.04 LTS
-- NVIDIA Driver (под вашу версию CUDA) и доступная GPU `nvidia-smi`
-- Docker + Docker Compose plugin
-- NVIDIA Container Toolkit (замена `nvidia-docker2` на новых версиях)
+- Ubuntu 24.04 LTS (или другой Linux с NVIDIA GPU)
+- NVIDIA Driver + CUDA
+- Docker + Docker Compose (с поддержкой GPU)
+- NVIDIA Container Toolkit
 
----
-
-## 1) Установка NVIDIA Container Toolkit (Ubuntu 24.04)
-
-Если GPU уже работает (`nvidia-smi` на хосте показывает A5000), поставьте toolkit и перезапустите Docker:
-
-Команды и актуальные инструкции: [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-
-Проверка, что Docker видит GPU:
+### Проверка GPU в Docker
 
 ```bash
-docker run --rm --gpus all nvidia/cuda:12.6.1-base-ubuntu24.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu24.04 nvidia-smi
 ```
 
 ---
 
-## 2) Конфигурация окружения
+## Быстрый старт
 
-Файл `.env.example` в этом окружении заблокирован (dotfile), поэтому используем `env.example`.
-
-Скопируйте и отредактируйте:
+### 1) Конфигурация
 
 ```bash
 cp env.example .env
 ```
 
-Поля:
-
-- **`HF_TOKEN`**: токен Hugging Face (нужен для gated/private моделей)
-- **`MODEL_NAME`**: Hugging Face repo id (например, `org/model-name`) или локальный путь `/data/models/...`
-- **`SERVED_MODEL_NAME`**: любой удобный id (то, что будет в `/v1/models` и что вы указываете как `"model": "..."` в запросах)
-- **`DTYPE=bfloat16`**, **`GPU_MEMORY_UTILIZATION=0.85`**, **`MAX_MODEL_LEN=8192`**, **`TENSOR_PARALLEL_SIZE=1`**
-
----
-
-## 3) (Опционально) Скачать модель заранее в volume
-
-Это ускорит первый старт и обеспечит повторное использование кэша.
+Отредактируйте `.env` и выберите backend:
 
 ```bash
-chmod +x download_model.sh
-HF_TOKEN=... ./download_model.sh org/model-name
+# Варианты: vllm, ollama, llamacpp
+LLM_BACKEND=vllm
 ```
 
-После скачивания можно переключиться на локальный путь:
+### 2) Скачивание модели
 
-- **`MODEL_NAME=/data/models/<ИМЯ_ПАПКИ_ИЗ_СКРИПТА>`** (скрипт сам подскажет итоговый путь)
-
----
-
-## 4) Запуск vLLM (OpenAI API) в Docker
+Выберите скрипт в зависимости от backend'а:
 
 ```bash
-docker compose up -d
+# Сделать скрипты исполняемыми
+chmod +x scripts/*.sh
+
+# vLLM (Hugging Face модели)
+./scripts/download_model_vllm.sh Qwen/Qwen3-8B-AWQ
+
+# Ollama
+./scripts/pull_model_ollama.sh qwen3:8b
+
+# llama.cpp (GGUF)
+./scripts/download_model_llamacpp.sh Qwen/Qwen3-8B-GGUF qwen3-8b-q4_k_m.gguf
 ```
 
-Проверка логов:
+### 3) Запуск
 
 ```bash
-docker compose logs -f vllm
+# vLLM
+docker compose --profile vllm up -d
+
+# Ollama
+docker compose --profile ollama up -d
+
+# llama.cpp
+docker compose --profile llamacpp up -d
 ```
 
-Проверка утилизации GPU:
+### 4) Проверка
 
 ```bash
-nvidia-smi
-```
+# Health check
+curl http://localhost:8000/health
 
----
+# Список моделей
+curl http://localhost:8000/v1/models
 
-## 5) Проверка API
-
-### cURL (без потока)
-
-```bash
-curl -s http://localhost:8000/v1/models | jq
-```
-
-```bash
-curl -s http://localhost:8000/v1/chat/completions \
+# Тестовый запрос
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"local-model",
-    "messages":[{"role":"user","content":"Привет! Коротко объясни, что такое vLLM."}],
-    "max_tokens":128,
-    "temperature":0.2
-  }' | jq
+    "model": "qwen3-8b",
+    "messages": [{"role": "user", "content": "Привет!"}],
+    "max_tokens": 100
+  }'
 ```
 
-### cURL (потоковая выдача SSE)
+---
+
+## Конфигурация backend'ов
+
+### vLLM
+
+Переменные в `.env`:
+
+| Переменная | Описание | Пример |
+|------------|----------|--------|
+| `VLLM_MODEL` | HF repo id модели | `Qwen/Qwen3-8B-AWQ` |
+| `VLLM_QUANTIZATION` | Тип квантизации | `awq`, `gptq`, пусто |
+| `VLLM_GPU_MEM_UTIL` | Использование GPU памяти | `0.65` |
+| `VLLM_KV_CACHE_DTYPE` | Тип KV cache | `fp8`, `auto` |
+| `MAX_MODEL_LEN` | Макс. длина контекста | `8192` |
+
+### Ollama
+
+Переменные в `.env`:
+
+| Переменная | Описание | Пример |
+|------------|----------|--------|
+| `OLLAMA_MODEL` | Имя модели в Ollama | `qwen3:8b` |
+| `OLLAMA_MODELS_DIR` | Путь к моделям | `./data/ollama` |
+| `OLLAMA_NUM_PARALLEL` | Параллельные запросы | `2` |
+
+Доступные модели Qwen3 в Ollama:
+- `qwen3:8b` — 8B параметров
+- `qwen3:14b` — 14B параметров  
+- `qwen3:32b` — 32B параметров
+
+### llama.cpp
+
+Переменные в `.env`:
+
+| Переменная | Описание | Пример |
+|------------|----------|--------|
+| `LLAMACPP_MODEL_FILE` | Имя GGUF-файла | `qwen3-8b-q4_k_m.gguf` |
+| `LLAMACPP_MODELS_DIR` | Путь к моделям | `./data/llamacpp` |
+| `LLAMACPP_GPU_LAYERS` | Слоёв на GPU | `99` (все) |
+| `LLAMACPP_CHAT_TEMPLATE` | Шаблон чата | `qwen3` |
+
+Рекомендуемые GGUF-квантизации:
+- `Q4_K_M` — баланс качества и скорости
+- `Q5_K_M` — выше качество
+- `Q8_0` — максимальное качество
+
+---
+
+## Дополнительные сервисы
+
+Кроме LLM, compose поднимает:
+
+| Сервис | Порт | Описание |
+|--------|------|----------|
+| **Embedding** | 8001 | Векторные представления (vLLM) |
+| **Reranker** | 8002 | Переранжирование (vLLM) |
+
+Эти сервисы запускаются **всегда**, независимо от выбранного LLM backend'а.
+
+---
+
+## API Proxy (опционально)
+
+Для унификации доступа к любому backend'у можно использовать FastAPI-прокси:
+
+```bash
+# Запуск прокси вместе с выбранным backend'ом
+docker compose --profile vllm --profile api up -d
+```
+
+Прокси будет доступен на порту **8080** и автоматически направит запросы к нужному backend'у.
+
+Поддерживает:
+- Авторизацию через `API_KEY`
+- Deep health check (`/health/deep`)
+- Информацию о конфигурации (`/config`)
+
+---
+
+## Переключение между backend'ами
+
+### Остановить текущий и запустить другой
+
+```bash
+# Остановить всё
+docker compose --profile vllm --profile ollama --profile llamacpp down
+
+# Запустить нужный
+docker compose --profile ollama up -d
+```
+
+### Изменить через .env
+
+1. Остановите сервисы: `docker compose down`
+2. Измените `LLM_BACKEND` в `.env`
+3. Запустите нужный профиль
+
+---
+
+## Тестирование
+
+### Python-тест
+
+```bash
+pip install -r requirements.txt
+python test_api.py
+```
+
+Скрипт автоматически определит модель из `/v1/models`.
+
+### Streaming (SSE)
 
 ```bash
 curl -N http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"local-model",
-    "messages":[{"role":"user","content":"Напиши 3 пункта, почему streaming полезен."}],
-    "max_tokens":128,
-    "temperature":0.2,
+    "model": "qwen3-8b",
+    "messages": [{"role": "user", "content": "Напиши короткую историю"}],
+    "max_tokens": 200,
     "stream": true
   }'
 ```
 
-### Тест на Python
-
-```bash
-python3 -m pip install -r requirements.txt
-python3 test_api.py
-```
-
-Если включили прокси (см. ниже) и задали `API_KEY`, то:
-
-```bash
-BASE_URL=http://localhost:8001 API_KEY=... python3 test_api.py
-```
-
 ---
 
-## 6) (Опционально) Запуск FastAPI-прокси (API key / кастомный /health)
+## Мониторинг
 
-Прокси слушает **`8001`** и проксирует на vLLM (`http://vllm:8000` внутри compose).
+### Логи
 
 ```bash
-docker compose --profile api up -d --build
+# vLLM
+docker compose logs -f llm-vllm
+
+# Ollama
+docker compose logs -f llm-ollama
+
+# llama.cpp
+docker compose logs -f llm-llamacpp
 ```
 
-Если в `.env` задан `API_KEY`, то прокси будет требовать:
+### GPU
 
-- `Authorization: Bearer <API_KEY>`
-
----
-
-## Оптимизация под A5000 (24GB)
-
-В `docker-compose.yml` уже выставлено:
-
-- **`--dtype bfloat16`**: тип для уменьшения VRAM (обычно подходит для Ampere/A5000)
-- **`--gpu-memory-utilization 0.85`**: оставляет запас под KV cache / пики
-- **`--max-model-len 8192`**: разумный потолок контекста под 24GB
-- **`--tensor-parallel-size 1`**: одна GPU
-
-Если получите OOM:
-
-- снизьте `GPU_MEMORY_UTILIZATION` до `0.80`
-- снизьте `MAX_MODEL_LEN` до `6144` или `4096`
+```bash
+nvidia-smi
+watch -n 1 nvidia-smi
+```
 
 ---
 
 ## Устранение неполадок
 
-- **Container не видит GPU**:
+### Container не видит GPU
 
-  - проверьте `nvidia-smi` на хосте
-  - проверьте `docker run --rm --gpus all ... nvidia-smi`
-  - убедитесь, что установлен NVIDIA Container Toolkit и Docker перезапущен
-- **Слишком долго стартует на первом запуске**:
+```bash
+# Проверить драйвер
+nvidia-smi
 
-  - это нормально, идёт скачивание модели/кэша
-  - используйте `download_model.sh` заранее
-- **Ошибки trust_remote_code**:
+# Проверить Docker + GPU
+docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu24.04 nvidia-smi
 
-  - в compose уже включено `--trust-remote-code`
+# Если не работает — установить NVIDIA Container Toolkit
+```
+
+### Out of Memory (OOM)
+
+- Уменьшите `VLLM_GPU_MEM_UTIL` (например, до `0.5`)
+- Уменьшите `MAX_MODEL_LEN` (например, до `4096`)
+- Используйте квантизированную модель (AWQ, GPTQ, GGUF Q4)
+
+### Ollama не видит модель
+
+```bash
+# Проверить скачанные модели
+docker exec llm-ollama ollama list
+
+# Скачать модель вручную
+docker exec llm-ollama ollama pull qwen3:8b
+```
+
+### llama.cpp не находит модель
+
+- Проверьте, что файл `.gguf` лежит в `LLAMACPP_MODELS_DIR`
+- Проверьте, что `LLAMACPP_MODEL_FILE` указывает на правильное имя файла
+
+---
+
+## Структура проекта
+
+```
+.
+├── docker-compose.yml      # Все сервисы с профилями
+├── Dockerfile              # Образ для API-прокси
+├── api_server.py           # FastAPI-прокси
+├── env.example             # Шаблон конфигурации
+├── requirements.txt        # Python-зависимости
+├── test_api.py             # Тестовый скрипт
+├── scripts/
+│   ├── download_model_vllm.sh      # Скачивание для vLLM
+│   ├── pull_model_ollama.sh        # Скачивание для Ollama
+│   └── download_model_llamacpp.sh  # Скачивание для llama.cpp
+└── data/
+    ├── ollama/             # Модели Ollama
+    └── llamacpp/           # GGUF-модели
+```
