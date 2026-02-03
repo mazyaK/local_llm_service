@@ -1,47 +1,111 @@
+version: "3.9"
+
 services:
-  vllm:
+
+  qwen3-llm:
     image: vllm/vllm-openai:latest
-    container_name: vllm-llm
+    container_name: qwen3-llm
+    shm_size: "16g"
     restart: unless-stopped
+    gpus: all
+    command:
+      - "--model"
+      - "Qwen/Qwen3-8B-AWQ"
+      - "--quantization"
+      - "awq"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - --served-model-name
+      - qwen3-8b
+
+      # KV cache
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--calculate-kv-scales"
+
+      # память
+      - "--gpu-memory-utilization"
+      - "0.65"
+
+      # ограничения
+      - "--max-model-len"
+      - "8192"
+      - "--max-num-seqs"
+      - "2"
+
     ports:
       - "8000:8000"
-    # Плагин Docker Compose поддерживает эту опцию (предпочтительнее устаревшего `runtime: nvidia`)
-    gpus: all
-    shm_size: "2gb"
-    environment:
-      # Токен Hugging Face (для публичных моделей опционален, для gated/private — обязателен)
-      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
-      # Путь к кэшу внутри контейнера (сохраняется через volume ниже)
-      - HF_HOME=/data/hf
-      - TRANSFORMERS_CACHE=/data/hf/transformers
-      # Опционально: убрать предупреждения про параллелизм токенизатора
-      - TOKENIZERS_PARALLELISM=false
     volumes:
-      - ./data:/data
-    command: >
-      --host 0.0.0.0
-      --port 8000
-      --model ${MODEL_NAME}
-      --served-model-name ${SERVED_MODEL_NAME}
-      --trust-remote-code
-      --dtype ${DTYPE:-bfloat16}
-      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.85}
-      --max-model-len ${MAX_MODEL_LEN:-8192}
-      --tensor-parallel-size ${TENSOR_PARALLEL_SIZE:-1}
+      - ~/.cache/huggingface:/root/.cache/huggingface
 
-  # Опционально: FastAPI reverse-proxy (добавляет стабильный /health и даёт место для auth/CORS/логирования)
-  # Включение: docker compose --profile api up -d --build
-  api:
-    profiles: ["api"]
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: llm-fastapi-proxy
+
+
+  qwen3-embedding:
+    image: vllm/vllm-openai:latest
+    container_name: qwen3-embedding
+    shm_size: "8g"
     restart: unless-stopped
+    gpus: all
     environment:
-      - VLLM_BASE_URL=http://vllm:8000
-      - API_KEY=${API_KEY:-}
-    depends_on:
-      - vllm
+      - HF_TOKEN=${HF_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-""}
+    command:
+#      - "--model"
+      - "Qwen/Qwen3-Embedding-0.6B"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8001"
+      - --served-model-name
+      - qwen3-embedding-0.6b
+
+      # для embedding KV cache не нужен
+      - "--gpu-memory-utilization"
+      - "0.2"
+
+      # можно снизить длину
+      - "--max-model-len"
+      - "768"
+
     ports:
       - "8001:8001"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+
+
+
+  vllm-reranker:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-reranker
+    shm_size: "8g"
+    command:
+        - cross-encoder/ms-marco-MiniLM-L6-v2
+        - --host
+        - 0.0.0.0
+        - --port
+        - "8002"
+        - --served-model-name
+        - ms-marco-mini-l6-v2
+        - --gpu-memory-utilization
+        - "0.1"
+
+    ports:
+      - "8002:8002"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - RERANK_API_KEY=${RERANK_API_KEY}
+    volumes:
+      - ./hf_cache:/root/.cache/huggingface
+      - ./models:/models
+    gpus: all
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD-SHELL","curl -sS http://localhost:8002/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+
