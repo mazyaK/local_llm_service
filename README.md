@@ -172,23 +172,159 @@ docker compose --profile vllm --profile api up -d
 
 ---
 
-## Переключение между backend'ами
+## Переключение между backend'ами (LLM-фреймворками)
 
-### Остановить текущий и запустить другой
+### Доступные backend'ы
+
+| Backend | Профиль | Описание | Когда использовать |
+|---------|---------|----------|-------------------|
+| **vLLM** | `--profile vllm` | Высокая производительность, PagedAttention | Production, высокие нагрузки |
+| **Ollama** | `--profile ollama` | Простота, встроенный менеджер моделей | Разработка, эксперименты |
+| **llama.cpp** | `--profile llamacpp` | GGUF-квантизации, гибкость | Ограниченная память, CPU/GPU |
+
+### Пошаговое переключение
+
+#### Шаг 1: Остановить текущий backend
 
 ```bash
-# Остановить всё
-docker compose --profile vllm --profile ollama --profile llamacpp down
+# Посмотреть, что сейчас запущено
+docker compose ps
 
-# Запустить нужный
-docker compose --profile ollama up -d
+# Остановить все LLM-контейнеры (embedding и reranker тоже остановятся)
+docker stop llm-vllm llm-ollama llm-llamacpp 2>/dev/null
+docker rm llm-vllm llm-ollama llm-llamacpp 2>/dev/null
+
+# Или принудительно остановить всё
+docker compose --profile vllm --profile ollama --profile llamacpp down
 ```
 
-### Изменить через .env
+#### Шаг 2: Скачать модель для нового backend'а (если ещё не скачана)
 
-1. Остановите сервисы: `docker compose down`
-2. Измените `LLM_BACKEND` в `.env`
-3. Запустите нужный профиль
+```bash
+# Для vLLM (Hugging Face)
+./scripts/download_model_vllm.sh Qwen/Qwen3-8B-AWQ
+
+# Для Ollama
+./scripts/pull_model_ollama.sh qwen3:8b
+
+# Для llama.cpp (GGUF)
+./scripts/download_model_llamacpp.sh Qwen/Qwen3-8B-GGUF qwen3-8b-q4_k_m.gguf
+```
+
+#### Шаг 3: Обновить `.env` (опционально)
+
+```bash
+nano .env
+```
+
+Измените `LLM_BACKEND` на нужный:
+
+```bash
+# Варианты: vllm, ollama, llamacpp
+LLM_BACKEND=ollama
+```
+
+#### Шаг 4: Запустить новый backend
+
+```bash
+# vLLM
+docker compose --profile vllm up -d
+
+# Ollama
+docker compose --profile ollama up -d
+
+# llama.cpp
+docker compose --profile llamacpp up -d
+```
+
+#### Шаг 5: Проверить, что работает
+
+```bash
+# Статус контейнеров
+docker compose ps
+
+# Логи (Ctrl+C для выхода)
+docker compose logs -f llm-ollama  # или llm-vllm, llm-llamacpp
+
+# Тестовый запрос
+curl http://localhost:8000/v1/models
+```
+
+---
+
+## Переключение между моделями
+
+### Смена модели в Ollama
+
+```bash
+# Посмотреть доступные модели
+docker exec llm-ollama ollama list
+
+# Скачать новую модель
+docker exec llm-ollama ollama pull qwen3:14b
+
+# Использовать в запросе
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "qwen3:14b", "messages": [{"role": "user", "content": "Привет!"}]}'
+```
+
+Ollama позволяет держать несколько моделей и переключаться между ними **без перезапуска** — просто указывайте нужную в поле `model`.
+
+### Смена модели в vLLM
+
+vLLM загружает **одну модель** при старте. Для смены:
+
+1. Остановите контейнер:
+   ```bash
+   docker compose --profile vllm down
+   ```
+
+2. Измените модель в `.env`:
+   ```bash
+   VLLM_MODEL=Qwen/Qwen3-14B-AWQ
+   ```
+
+3. Запустите снова:
+   ```bash
+   docker compose --profile vllm up -d
+   ```
+
+### Смена модели в llama.cpp
+
+1. Скачайте новый GGUF-файл:
+   ```bash
+   ./scripts/download_model_llamacpp.sh bartowski/Qwen3-14B-GGUF Qwen3-14B-Q4_K_M.gguf
+   ```
+
+2. Измените в `.env`:
+   ```bash
+   LLAMACPP_MODEL_FILE=Qwen3-14B-Q4_K_M.gguf
+   ```
+
+3. Перезапустите:
+   ```bash
+   docker compose --profile llamacpp down
+   docker compose --profile llamacpp up -d
+   ```
+
+---
+
+## Быстрая шпаргалка команд
+
+| Действие | Команда |
+|----------|---------|
+| Запустить vLLM | `docker compose --profile vllm up -d` |
+| Запустить Ollama | `docker compose --profile ollama up -d` |
+| Запустить llama.cpp | `docker compose --profile llamacpp up -d` |
+| Остановить текущий | `docker compose --profile <профиль> down` |
+| Остановить всё | `docker compose --profile vllm --profile ollama --profile llamacpp down` |
+| Статус | `docker compose ps` |
+| Логи vLLM | `docker compose logs -f llm-vllm` |
+| Логи Ollama | `docker compose logs -f llm-ollama` |
+| Логи llama.cpp | `docker compose logs -f llm-llamacpp` |
+| Список моделей Ollama | `docker exec llm-ollama ollama list` |
+| Скачать модель Ollama | `docker exec llm-ollama ollama pull <model>` |
 
 ---
 
@@ -203,17 +339,92 @@ python test_api.py
 
 Скрипт автоматически определит модель из `/v1/models`.
 
+### Тестовый запрос с измерением времени
+
+```bash
+time curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3:8b",
+    "messages": [{"role": "user", "content": "2+2=?"}],
+    "max_tokens": 100
+  }' | jq '.choices[0].message'
+```
+
 ### Streaming (SSE)
 
 ```bash
 curl -N http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen3-8b",
+    "model": "qwen3:8b",
     "messages": [{"role": "user", "content": "Напиши короткую историю"}],
     "max_tokens": 200,
     "stream": true
   }'
+```
+
+---
+
+## Особенности Qwen3
+
+### Режим рассуждений (Reasoning Mode)
+
+Qwen3 по умолчанию использует **режим рассуждений** — модель сначала "думает" в поле `reasoning`, затем выдаёт ответ в `content`.
+
+Пример ответа:
+```json
+{
+  "message": {
+    "role": "assistant",
+    "content": "Париж",
+    "reasoning": "Пользователь спрашивает столицу Франции. Это общеизвестный факт..."
+  }
+}
+```
+
+### Увеличьте max_tokens
+
+Если `content` пустой — модель потратила все токены на рассуждения. Увеличьте `max_tokens`:
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3:8b",
+    "messages": [{"role": "user", "content": "Столица Франции?"}],
+    "max_tokens": 500
+  }' | jq '.choices[0].message'
+```
+
+### Отключение режима рассуждений
+
+Добавьте системный промпт:
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3:8b",
+    "messages": [
+      {"role": "system", "content": "Отвечай кратко и по делу. Не используй режим рассуждений."},
+      {"role": "user", "content": "Столица Франции?"}
+    ],
+    "max_tokens": 200
+  }' | jq -r '.choices[0].message.content'
+```
+
+### Имена моделей в разных backend'ах
+
+| Backend | Имя модели в запросе |
+|---------|---------------------|
+| vLLM | `qwen3-8b` (значение `SERVED_MODEL_NAME`) |
+| Ollama | `qwen3:8b` (как скачали через `ollama pull`) |
+| llama.cpp | Зависит от настройки сервера |
+
+Проверить доступные модели:
+```bash
+curl -s http://localhost:8000/v1/models | jq '.data[].id'
 ```
 
 ---
