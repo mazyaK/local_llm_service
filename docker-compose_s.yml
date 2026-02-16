@@ -1,0 +1,47 @@
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-llm
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    # Плагин Docker Compose поддерживает эту опцию (предпочтительнее устаревшего `runtime: nvidia`)
+    gpus: all
+    shm_size: "2gb"
+    environment:
+      # Токен Hugging Face (для публичных моделей опционален, для gated/private — обязателен)
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+      # Путь к кэшу внутри контейнера (сохраняется через volume ниже)
+      - HF_HOME=/data/hf
+      - TRANSFORMERS_CACHE=/data/hf/transformers
+      # Опционально: убрать предупреждения про параллелизм токенизатора
+      - TOKENIZERS_PARALLELISM=false
+    volumes:
+      - ./data:/data
+    command: >
+      --host 0.0.0.0
+      --port 8000
+      --model ${MODEL_NAME}
+      --served-model-name ${SERVED_MODEL_NAME}
+      --trust-remote-code
+      --dtype ${DTYPE:-bfloat16}
+      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.85}
+      --max-model-len ${MAX_MODEL_LEN:-8192}
+      --tensor-parallel-size ${TENSOR_PARALLEL_SIZE:-1}
+
+  # Опционально: FastAPI reverse-proxy (добавляет стабильный /health и даёт место для auth/CORS/логирования)
+  # Включение: docker compose --profile api up -d --build
+  api:
+    profiles: ["api"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llm-fastapi-proxy
+    restart: unless-stopped
+    environment:
+      - VLLM_BASE_URL=http://vllm:8000
+      - API_KEY=${API_KEY:-}
+    depends_on:
+      - vllm
+    ports:
+      - "8001:8001"

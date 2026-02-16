@@ -1,47 +1,231 @@
-services:
-  vllm:
-    image: vllm/vllm-openai:latest
-    container_name: vllm-llm
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    # Плагин Docker Compose поддерживает эту опцию (предпочтительнее устаревшего `runtime: nvidia`)
-    gpus: all
-    shm_size: "2gb"
-    environment:
-      # Токен Hugging Face (для публичных моделей опционален, для gated/private — обязателен)
-      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
-      # Путь к кэшу внутри контейнера (сохраняется через volume ниже)
-      - HF_HOME=/data/hf
-      - TRANSFORMERS_CACHE=/data/hf/transformers
-      # Опционально: убрать предупреждения про параллелизм токенизатора
-      - TOKENIZERS_PARALLELISM=false
-    volumes:
-      - ./data:/data
-    command: >
-      --host 0.0.0.0
-      --port 8000
-      --model ${MODEL_NAME}
-      --served-model-name ${SERVED_MODEL_NAME}
-      --trust-remote-code
-      --dtype ${DTYPE:-bfloat16}
-      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.85}
-      --max-model-len ${MAX_MODEL_LEN:-8192}
-      --tensor-parallel-size ${TENSOR_PARALLEL_SIZE:-1}
+# =============================================================================
+# Docker Compose с переключаемым LLM backend'ом
+# Использование:
+#   vLLM:      docker compose --profile vllm up -d
+#   Ollama:    docker compose --profile ollama up -d
+#   llama.cpp: docker compose --profile llamacpp up -d
+#
+# Embedding и Reranker пока остаются на vLLM (можно мигрировать отдельно)
+# =============================================================================
 
-  # Опционально: FastAPI reverse-proxy (добавляет стабильный /health и даёт место для auth/CORS/логирования)
-  # Включение: docker compose --profile api up -d --build
+services:
+
+  # ===========================================================================
+  # LLM BACKEND: vLLM (профиль: vllm)
+  # ===========================================================================
+  llm-vllm:
+    profiles: ["vllm"]
+    image: vllm/vllm-openai:latest
+    container_name: llm-vllm
+    shm_size: "16g"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command:
+      - "--model"
+      - "${VLLM_MODEL:-Qwen/Qwen3-8B-AWQ}"
+      - "--quantization"
+      - "${VLLM_QUANTIZATION:-awq}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--served-model-name"
+      - "${SERVED_MODEL_NAME:-qwen3-8b}"
+      # KV cache
+      - "--kv-cache-dtype"
+      - "${VLLM_KV_CACHE_DTYPE:-fp8}"
+      - "--calculate-kv-scales"
+      # Память
+      - "--gpu-memory-utilization"
+      - "${VLLM_GPU_MEM_UTIL:-0.65}"
+      # Ограничения
+      - "--max-model-len"
+      - "${MAX_MODEL_LEN:-8192}"
+      - "--max-num-seqs"
+      - "${VLLM_MAX_NUM_SEQS:-2}"
+    ports:
+      - "${LLM_PORT:-8000}:8000"
+    volumes:
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # LLM BACKEND: Ollama (профиль: ollama)
+  # ===========================================================================
+  llm-ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:latest
+    container_name: llm-ollama
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "${LLM_PORT:-8000}:11434"
+    volumes:
+      - ${OLLAMA_MODELS_DIR:-./data/ollama}:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-2}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # LLM BACKEND: llama.cpp (профиль: llamacpp)
+  # Использует llama-cpp-python[server] с OpenAI-совместимым API
+  # ===========================================================================
+  llm-llamacpp:
+    profiles: ["llamacpp"]
+    image: ghcr.io/ggerganov/llama.cpp:server-cuda
+    container_name: llm-llamacpp
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "-m"
+      - "/models/${LLAMACPP_MODEL_FILE:-model.gguf}"
+      - "-c"
+      - "${MAX_MODEL_LEN:-8192}"
+      - "-ngl"
+      - "${LLAMACPP_GPU_LAYERS:-99}"
+      - "--chat-template"
+      - "${LLAMACPP_CHAT_TEMPLATE:-qwen3}"
+    ports:
+      - "${LLM_PORT:-8000}:8080"
+    volumes:
+      - ${LLAMACPP_MODELS_DIR:-./data/llamacpp}:/models:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # EMBEDDING: vLLM (запускается всегда, независимо от LLM backend'а)
+  # ===========================================================================
+  embedding:
+    image: vllm/vllm-openai:latest
+    container_name: qwen3-embedding
+    shm_size: "8g"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    command:
+      - "${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8001"
+      - "--served-model-name"
+      - "${EMBEDDING_SERVED_NAME:-qwen3-embedding-0.6b}"
+      - "--gpu-memory-utilization"
+      - "${EMBEDDING_GPU_MEM_UTIL:-0.2}"
+      - "--max-model-len"
+      - "${EMBEDDING_MAX_LEN:-768}"
+    ports:
+      - "8001:8001"
+    volumes:
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # RERANKER: vLLM (запускается всегда, независимо от LLM backend'а)
+  # ===========================================================================
+  reranker:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-reranker
+    shm_size: "8g"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command:
+      - "${RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L6-v2}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8002"
+      - "--served-model-name"
+      - "${RERANKER_SERVED_NAME:-ms-marco-mini-l6-v2}"
+      - "--gpu-memory-utilization"
+      - "${RERANKER_GPU_MEM_UTIL:-0.1}"
+    ports:
+      - "8002:8002"
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - RERANK_API_KEY=${RERANK_API_KEY:-}
+    volumes:
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # API PROXY: FastAPI-прокси (опционально, профиль: api)
+  # Унифицирует доступ к любому LLM backend'у
+  # ===========================================================================
   api:
     profiles: ["api"]
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: llm-fastapi-proxy
+    container_name: llm-api-proxy
     restart: unless-stopped
     environment:
-      - VLLM_BASE_URL=http://vllm:8000
+      - LLM_BACKEND=${LLM_BACKEND:-vllm}
+      - LLM_BACKEND_URL=${LLM_BACKEND_URL:-}
+      - SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-qwen3-8b}
       - API_KEY=${API_KEY:-}
-    depends_on:
-      - vllm
     ports:
-      - "8001:8001"
+      - "8080:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
